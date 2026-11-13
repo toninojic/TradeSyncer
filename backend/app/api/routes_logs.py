@@ -260,11 +260,14 @@ async def system_log(
 
 @router.get("/risk/events")
 async def risk_events(
-    day: str | None = Query(default=None, description="trading day YYYY-MM-DD; default: all"),
+    day: str | None = Query(default=None, description="trading day YYYY-MM-DD or 'today'; default: all"),
     limit: int = Query(default=500, ge=1, le=5000),
     db: AsyncSession = Depends(get_db),
+    runtime: Runtime = Depends(get_runtime),
 ) -> list[dict[str, Any]]:
     q = select(RiskEvent)
+    if day == "today":
+        day = runtime.risk.info()["trading_day"]
     if day:
         q = q.where(RiskEvent.trading_day == day)
     rows = await db.execute(q.order_by(RiskEvent.ts.desc()).limit(limit))

@@ -76,7 +76,7 @@ class ContractMappingRow(Base):
 
 
 class RiskRules(Base):
-    """Per-follower risk rules. Stored from M2, enforced from M4."""
+    """Per-follower risk rules (enforced by app.engine.risk.RiskManager)."""
 
     __tablename__ = "risk_rules"
 
@@ -89,6 +89,20 @@ class RiskRules(Base):
     trading_days: Mapped[str] = mapped_column(String(20), default="0,1,2,3,4")  # Mon=0
 
     account: Mapped[Account] = relationship(back_populates="risk_rules")
+
+
+class RiskStateRow(Base):
+    """Runtime risk state that must survive a restart (the daily-loss lock)."""
+
+    __tablename__ = "risk_state"
+
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_day: Mapped[str | None] = mapped_column(String(10), nullable=True)  # trading day of the lock
+    locked_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    baseline: Mapped[float] = mapped_column(Float, default=0.0)  # day P&L at the last manual re-enable
+    baseline_day: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 
 class RiskEvent(Base):

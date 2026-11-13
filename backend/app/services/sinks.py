@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import FollowerOrder, LeaderEvent, SystemLog
+from app.db.models import FollowerOrder, LeaderEvent, RiskEvent, SystemLog
 from app.engine.events import (
     EngineRecord,
     FollowerOrderRecord,
     LeaderEventRecord,
     LogRecord,
+    RiskEventRecord,
     StatusChanged,
 )
 
@@ -57,6 +58,11 @@ def log_row(r: LogRecord) -> SystemLog:
                      account_id=to_int(r.account_id), message=r.message, data=r.data)
 
 
+def risk_event_row(r: RiskEventRecord) -> RiskEvent:
+    return RiskEvent(account_id=to_int(r.follower_id) or 0, rule=r.rule, message=r.message,
+                     trading_day=r.trading_day, ts=r.ts)
+
+
 def record_payload(record: EngineRecord) -> dict[str, Any] | None:
     """JSON message for the browser (ids normalised to the DB's integer ids)."""
     if isinstance(record, LeaderEventRecord):
@@ -75,6 +81,11 @@ def record_payload(record: EngineRecord) -> dict[str, Any] | None:
         data["level"] = str(record.level)
         data["category"] = str(record.category)
         return {"type": "log", "data": data}
+    if isinstance(record, RiskEventRecord):
+        data = record.to_dict()
+        data["account_id"] = to_int(record.follower_id)
+        del data["follower_id"]
+        return {"type": "risk_event", "data": data}
     return None
 
 
@@ -132,6 +143,8 @@ class DbSink:
                             await session.merge(follower_order_row(item))
                         elif isinstance(item, LogRecord):
                             session.add(log_row(item))
+                        elif isinstance(item, RiskEventRecord):
+                            session.add(risk_event_row(item))
                     await session.commit()
             except Exception:
                 log.exception("Failed to write %d engine records", len(batch))
@@ -152,5 +165,5 @@ class HubSink:
         payload = record_payload(record)
         if payload is not None:
             self._runtime.hub.publish(payload)
-        if isinstance(record, FollowerOrderRecord):
+        if isinstance(record, (FollowerOrderRecord, RiskEventRecord)):
             self._runtime.mark_dirty()

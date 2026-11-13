@@ -7,14 +7,14 @@ reconciliation, risk rules and a web admin panel.
 This MVP runs entirely on a **simulated broker**. It never connects to a real
 broker and never sends real orders.
 
-> **Status: Milestone 3 of 4**
+> **Status: all four milestones are done.**
 >
 > | Milestone | Content | Status |
 > |---|---|---|
 > | M1 | Broker interface, SimulatedBroker, copy engine, Tradovate stub, tests | ✅ done |
 > | M2 | Database, login, REST API, WebSocket, seed data, Docker Compose | ✅ done |
 > | M3 | Admin panel (React) | ✅ done |
-> | M4 | Risk rule enforcement, polish | next |
+> | M4 | Risk rules (daily loss limit, max position, trading hours), trading day | ✅ done |
 
 ---
 
@@ -30,7 +30,7 @@ First time only (the project lives in `E:\14.TradeSyncer` in this example):
 cd /e/14.TradeSyncer/backend
 py -3.13 -m venv .venv            # skip if .venv already exists
 source .venv/Scripts/activate
-pip install -e ".[dev]"           # run again after every update of the project
+pip install -e ".[dev]"           # run again after every update of the project (new packages)
 python -m app.cli init            # creates ../.env: asks for an admin username and password
 ```
 
@@ -99,10 +99,10 @@ on `127.0.0.1` only. Python and Docker use separate databases.
 | **Dashboard** | Copier status, pause/resume, the red **KILL SWITCH**, leader position and P&L, every follower's position vs. target with sync status, today's P&L, latency, recent alerts. Updates live. |
 | **Accounts** | Add, edit, enable/disable and delete accounts, choose leader/follower and broker type, test the connection. Broker credentials are write-only. |
 | **Copy settings** | Per follower: multiplier, max contracts, copy SL/TP on/off, auto-correct vs. alert-only, contract mapping (e.g. NQ → MNQ 10:1) and a sizing preview. |
-| **Risk** | Per follower: daily loss limit, max position, trading hours (New York time), and the list of triggered rules. Enforcement arrives in M4. |
+| **Risk** | Per follower: daily loss limit, max position, trading hours (New York time). Shows today's state of every rule (loss used, locked, exits only), lets you re-enable a locked follower, and lists the triggered rules. |
 | **Trade log** | Every leader event with the follower orders it caused: status, fill, latency, errors. Filters and CSV export. |
 | **System log** | Connections, reconciliation fixes, rejections, kill switch and rule events. Filter by level, category, account, text. |
-| **Simulator** | Buy/sell on the leader (market, limit, stop, with SL/TP), close positions, modify/cancel leader orders, move prices, and inject failures (disconnect, reject, partial fill, latency, duplicate events). |
+| **Simulator** | Buy/sell on the leader (market, limit, stop, with SL/TP), close positions, modify/cancel leader orders, move prices, inject failures (disconnect, reject, partial fill, latency, duplicate events), and start a new trading day on demand. |
 
 A quick test: open **Simulator**, tick *Attach stop loss / take profit*, click
 **Buy 1 NQ**, then look at the **Dashboard** and the **Trade log**. Then use
@@ -164,6 +164,25 @@ With 0.5× and a leader that buys 1, then 1 more: the first buy gives 0
 | SL/TP (bracket or standalone) | Same SL/TP, **never larger than the follower's own position** |
 | Partial close | Follower reduces; its SL/TP shrink to the new size |
 
+### Risk rules (per follower, all optional)
+
+| Rule | What happens |
+|---|---|
+| **Daily loss limit** | Counts realized + unrealized P&L of the trading day and is checked on every price change. When it is reached the follower is **flattened** and **stops copying** until the next trading day. You can re-enable it by hand earlier (Dashboard or Risk page); it then gets a fresh allowance of the same size, measured from its current P&L. The lock survives a restart. |
+| **Max position** | Hard cap per symbol. The follower's target is capped, so it simply holds less than the leader (it is not blocked and not "out of sync"). Resting entry orders plus the position never add up to more than the cap. |
+| **Trading hours** | Entered in New York time, with weekdays. Outside the window **new entries are not copied; exits still are** (closing, SL/TP changes), so an open position stays managed. When the window opens while the leader is already in a trade, the follower waits for the next trade. |
+
+The **trading day** follows the CME session: it rolls at **17:00 Chicago time**
+(midnight in Belgrade for most of the year). At the roll, daily P&L starts at
+zero, risk counters are cleared and locked followers copy again. Positions held
+through the roll are counted from the price at the roll. The Simulator page has
+a button to trigger the roll by hand for testing.
+
+A quick test of the daily loss limit: on **Risk** set a limit of 300 for F1,
+on **Simulator** buy 2 NQ and press the `− 10` price button (F1 is then at
+−$400). The Dashboard shows F1 flat with "Loss limit hit" and a **Re-enable**
+button; the other followers keep their positions.
+
 ### Safety mechanisms
 
 * **Idempotency** – every broker event has a unique id; duplicates are ignored.
@@ -224,10 +243,10 @@ With 0.5× and a leader that buys 1, then 1 more: the first buy gives 0
 | Copier | `POST /api/copier/pause`, `/resume`, `/kill`, `/reconcile` |
 | Accounts | `GET/POST /api/accounts`, `GET/PUT/DELETE /api/accounts/{id}`, `POST .../test-connection`, `.../flatten`, `.../retry-sync`, `GET .../orders` |
 | Copy settings | `GET/PUT /api/accounts/{id}/copy-settings` |
-| Risk rules | `GET/PUT /api/accounts/{id}/risk-rules`, `GET /api/risk/events` (rules are enforced from M4) |
+| Risk rules | `GET/PUT /api/accounts/{id}/risk-rules`, `POST /api/accounts/{id}/risk/unlock`, `GET /api/risk/events` (`?day=today`) |
 | Trade log | `GET /api/trades` (filters: since, until, follower_id, status, action, symbol), `GET /api/trades/export.csv` |
 | System log | `GET /api/logs` (filters: level, category, account_id, search) |
-| Simulator | `GET /api/sim/state`, `POST /api/sim/order`, `/close`, `/price`, `/walk`, `/orders/{id}/modify`, `/orders/{id}/cancel`, `/accounts/{id}/failures` |
+| Simulator | `GET /api/sim/state`, `POST /api/sim/order`, `/close`, `/price`, `/walk`, `/new-day`, `/orders/{id}/modify`, `/orders/{id}/cancel`, `/accounts/{id}/failures` |
 | Live updates | WebSocket `/ws` (snapshot, leader_event, follower_order, log) |
 
 ---
@@ -275,7 +294,7 @@ TradeSyncer/
    │  ├─ api/                  REST routes + WebSocket
    │  ├─ services/             runtime (engine lifecycle), DB/WebSocket sinks, WS hub
    │  ├─ db/                   SQLAlchemy models, seed data, helpers
-   │  ├─ core/                 contracts, security (hashing, encryption, redaction), logging
+   │  ├─ core/                 contracts, trading day (CME session), security, logging
    │  ├─ brokers/
    │  │  ├─ base.py            BrokerAdapter interface + data models
    │  │  ├─ sim/               SimMarket (prices) and SimulatedBroker
@@ -287,7 +306,7 @@ TradeSyncer/
    │     ├─ reconciler.py      reconciliation decision (pure function)
    │     ├─ state.py           duplicate-safe position bookkeeping
    │     ├─ connection.py      reconnect with exponential backoff
-   │     ├─ risk.py            risk hook (rules come in M4)
+   │     ├─ risk.py            risk rules: daily loss lock, max position, trading hours
    │     ├─ config.py          follower and engine settings
    │     └─ events.py          trade-log / system-log records
    └─ tests/

@@ -25,6 +25,7 @@ const SYNC: Record<SyncStatus, { tone: Tone; label: string }> = {
   paused: { tone: "amber", label: "Paused" },
   disabled: { tone: "slate", label: "Copying off" },
   disconnected: { tone: "red", label: "Disconnected" },
+  risk_locked: { tone: "red", label: "Loss limit hit" },
 };
 
 export function SyncBadge({ status }: { status: SyncStatus | undefined }) {

@@ -18,10 +18,13 @@ from app.brokers.tradovate import TradovateAdapter
 from app.config import Settings
 from app.core.security import CredentialCipher
 from app.db.models import Account
-from app.db.repo import follower_config, get_setting, list_accounts, set_setting
+from app.db.repo import follower_config, get_setting, list_accounts, risk_rules_cfg, set_setting
 from app.engine.config import EngineSettings
 from app.engine.copy_engine import CopyEngine
+from app.engine.follower_worker import ReconcileTick
 from app.engine.events import FanoutSink, LogCategory, LogLevel, LogRecord
+from app.engine.risk import RiskManager
+from app.services.risk_store import DbRiskStore
 from app.services.sinks import DbSink, HubSink
 from app.services.ws_hub import WsHub
 
@@ -71,6 +74,7 @@ class Runtime:
         self.hub = WsHub()
         self.db_sink = DbSink(sessionmaker)
         self.sink = FanoutSink(self.db_sink, HubSink(self))
+        self.risk = RiskManager(sink=self.sink, store=DbRiskStore(sessionmaker))
         self.sessions: dict[str, float] = {}  # session id -> expiry (epoch)
         self.login_failures: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
@@ -84,6 +88,7 @@ class Runtime:
         self.market.add_listener(self._on_price)
         if self.settings.sim_random_walk:
             self.market.start()
+        await self.risk.start()
         await self.rebuild("startup")
         self._tasks = [
             asyncio.create_task(self._broadcast_loop(), name="ws-broadcast"),
@@ -99,6 +104,7 @@ class Runtime:
             except (asyncio.CancelledError, Exception):
                 pass
         self._tasks = []
+        await self.risk.stop()
         if self.engine:
             await self.engine.stop(disconnect=True)
             self.engine = None
@@ -117,6 +123,7 @@ class Runtime:
                 accounts = await list_accounts(session)
                 running = await get_setting(session, "copier_running", True)
 
+            self.risk.attach(None, self._day_pnl, self._reset_day)
             if self.engine is not None:
                 await self.engine.stop(disconnect=True)
                 self.engine = None
@@ -141,6 +148,9 @@ class Runtime:
 
             enabled = [a for a in accounts if a.enabled and a.engine_id in self.adapters]
             leaders = [a for a in enabled if a.role == "leader"]
+            self.risk.set_rules(
+                {a.engine_id: risk_rules_cfg(a) for a in enabled if a.role == "follower"}
+            )
             if len(leaders) != 1:
                 self.status_note = (
                     "No enabled leader account" if not leaders
@@ -157,8 +167,9 @@ class Runtime:
             ]
             self.engine = CopyEngine(
                 self.adapters[leaders[0].engine_id], followers,
-                sink=self.sink, settings=self.engine_settings,
+                sink=self.sink, settings=self.engine_settings, risk=self.risk,
             )
+            self.risk.attach(self.engine, self._day_pnl, self._reset_day)
             await self.engine.start(running=bool(running))
             await self.log(LogLevel.INFO, LogCategory.ENGINE,
                            f"Copier (re)built ({reason}): leader {leaders[0].name}, "
@@ -187,17 +198,46 @@ class Runtime:
             adapter.close()
 
     async def apply_follower_settings(self, account_id: int) -> None:
-        """Push changed copy settings to a running follower without a rebuild."""
+        """Push changed copy settings and risk rules to a running follower
+        without a rebuild."""
         async with self.sessionmaker() as session:
             account = await session.get(Account, account_id)
             if account is None:
                 return
             cfg = follower_config(account)
+            rules = risk_rules_cfg(account)
             info = self.accounts.get(account.engine_id)
             if info:
                 info.name = account.name
         if self.engine and cfg.account_id in self.engine.workers:
+            self.risk.set_rule(cfg.account_id, rules)
             self.engine.update_follower(cfg)
+            self.engine.workers[cfg.account_id].submit(ReconcileTick())
+        self.mark_dirty()
+
+    # ================================================================== risk
+
+    def _day_pnl(self, follower_id: str) -> float | None:
+        adapter = self.adapters.get(follower_id)
+        if isinstance(adapter, SimulatedBroker):
+            return adapter.account_snapshot().day_pnl
+        cache = self.cache.get(follower_id)
+        return cache.snapshot.day_pnl if cache and cache.snapshot else None
+
+    def _reset_day(self) -> None:
+        """New trading day: simulated accounts start with a day P&L of zero."""
+        for adapter in self.adapters.values():
+            if isinstance(adapter, SimulatedBroker):
+                adapter.reset_day()
+        self.mark_dirty()
+
+    async def unlock_risk(self, account_id: int) -> bool:
+        unlocked = await self.risk.unlock(str(account_id))
+        self.mark_dirty()
+        return unlocked
+
+    async def new_trading_day(self) -> None:
+        await self.risk.start_new_day()
         self.mark_dirty()
 
     # ================================================================== controls
@@ -289,8 +329,12 @@ class Runtime:
             worker = workers.get(key)
             if worker is not None:
                 entry["copy"] = {k: v for k, v in worker.items() if k not in ("account_id", "name")}
+            risk = self.risk.snapshot(key)
+            if risk is not None:
+                entry["risk"] = risk
             accounts.append(entry)
         return {
+            **self.risk.info(),
             "copier": {
                 "state": self.copier_state(),
                 "note": self.status_note,
@@ -324,6 +368,7 @@ class Runtime:
 
     def _on_price(self, underlying: str, price: float) -> None:
         self._dirty.set()
+        self.risk.poke()  # unrealized P&L changed: re-check the daily loss limits
 
     async def _broadcast_loop(self) -> None:
         last = 0.0

@@ -179,12 +179,17 @@ class AccountSnapshot:
     account_id: str
     balance: float
     realized_pnl_today: float
-    unrealized_pnl: float
+    unrealized_pnl: float  # open P&L measured from the entry price
     status: ConnectionStatus
+    # Open P&L measured from the start of the trading day (the price at the daily
+    # reset for positions carried over). None = same as unrealized_pnl.
+    day_unrealized_pnl: float | None = None
 
     @property
     def day_pnl(self) -> float:
-        return round(self.realized_pnl_today + self.unrealized_pnl, 2)
+        """Realized + unrealized P&L of the current trading day."""
+        open_pnl = self.unrealized_pnl if self.day_unrealized_pnl is None else self.day_unrealized_pnl
+        return round(self.realized_pnl_today + open_pnl, 2)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

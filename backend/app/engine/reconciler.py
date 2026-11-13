@@ -16,6 +16,7 @@ class SyncStatus(StrEnum):
     PAUSED = "paused"
     DISABLED = "disabled"
     DISCONNECTED = "disconnected"
+    RISK_LOCKED = "risk_locked"  # daily loss limit hit: flattened, not copying
 
 
 class ReconcileAction(StrEnum):

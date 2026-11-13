@@ -137,7 +137,9 @@ async def test_multiplier_change_applies_on_next_reconcile(rig):
 
 
 async def test_risk_guard_can_block_orders():
-    class MaxTwo:
+    from app.engine.risk import AllowAll
+
+    class MaxTwo(AllowAll):
         def check_order(self, follower_id, request, current_position, reduces_exposure):
             if not reduces_exposure and abs(current_position + request.side.sign * request.qty) > 2:
                 return "max position 2"

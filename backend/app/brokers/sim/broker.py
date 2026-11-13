@@ -93,6 +93,9 @@ class _PositionState:
     qty: int = 0
     avg_price: float = 0.0
     realized_today: float = 0.0
+    # Cost basis for the *day* P&L: the entry price, or the price at the daily
+    # reset for a position that was carried into the new trading day.
+    day_price: float = 0.0
 
 
 @dataclass
@@ -203,9 +206,14 @@ class SimulatedBroker(BrokerAdapter):
         self.failures = FailureInjection()
 
     def reset_day(self) -> None:
+        """Start a new trading day: the day P&L restarts at zero. Open positions
+        are carried at the current price for day-P&L purposes (like a daily
+        settlement); their entry price and the account balance are unchanged."""
         self._realized_today = 0.0
-        for pos in self._positions.values():
+        for symbol, pos in self._positions.items():
             pos.realized_today = 0.0
+            if pos.qty:
+                pos.day_price = self.market.price(symbol)
 
     # ================================================================== queries
 
@@ -221,6 +229,10 @@ class SimulatedBroker(BrokerAdapter):
             realized_pnl_today=round(self._realized_today, 2),
             unrealized_pnl=round(sum(p.unrealized_pnl for p in self.positions_snapshot()), 2),
             status=self._status,
+            day_unrealized_pnl=round(sum(
+                pnl(symbol, st.day_price, self.market.price(symbol), st.qty)
+                for symbol, st in self._positions.items() if st.qty
+            ), 2),
         )
 
     async def get_positions(self) -> list[Position]:
@@ -488,20 +500,27 @@ class SimulatedBroker(BrokerAdapter):
             state.avg_price = round(
                 (state.avg_price * abs(state.qty) + price * qty) / abs(new_qty), 6
             )
+            state.day_price = round(
+                (state.day_price * abs(state.qty) + price * qty) / abs(new_qty), 6
+            )
             state.qty = new_qty
             return
         closing = min(abs(state.qty), qty)
-        realized = pnl(symbol, state.avg_price, price, (1 if state.qty > 0 else -1) * closing)
-        state.realized_today = round(state.realized_today + realized, 2)
-        self._realized_today = round(self._realized_today + realized, 2)
+        direction = 1 if state.qty > 0 else -1
+        realized = pnl(symbol, state.avg_price, price, direction * closing)  # since entry -> balance
+        realized_day = pnl(symbol, state.day_price, price, direction * closing)  # since the day start
+        state.realized_today = round(state.realized_today + realized_day, 2)
+        self._realized_today = round(self._realized_today + realized_day, 2)
         self._realized_total = round(self._realized_total + realized, 2)
         state.qty += side.sign * closing
         if state.qty == 0:
             state.avg_price = 0.0
+            state.day_price = 0.0
         opening = qty - closing
         if opening > 0:
             state.qty = side.sign * opening
             state.avg_price = price
+            state.day_price = price
 
     def _position(self, symbol: str, state: _PositionState) -> Position:
         market = self.market.price(symbol)

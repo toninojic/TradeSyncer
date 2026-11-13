@@ -32,6 +32,7 @@ export function SystemLogPage() {
     queryKey: ["logs", params],
     queryFn: () => api.get<LogEntry[]>(`/api/logs${queryString(params)}`),
     enabled: levels.length > 0,
+    staleTime: 0, // always reload when the page opens
   });
   useLiveEvents(["log"], () => live && void logs.refetch(), 300);
 

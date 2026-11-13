@@ -59,6 +59,23 @@ async def test_market_order_fills_and_updates_pnl(broker):
     assert snap.balance == 50_200
 
 
+async def test_day_reset_carries_open_positions_at_the_reset_price(broker):
+    await broker.place_order(OrderRequest("NQ", Side.BUY, 2))
+    broker.market.set_price("NQ", 24990)  # -$400 open
+    assert broker.account_snapshot().day_pnl == -400
+    broker.reset_day()
+    snap = broker.account_snapshot()
+    assert snap.day_pnl == 0  # the new day starts at zero ...
+    assert snap.unrealized_pnl == -400  # ... while the position still shows its P&L since entry
+    assert broker.positions_snapshot()[0].avg_price == 25000  # entry price is kept
+    broker.market.set_price("NQ", 24985)
+    assert broker.account_snapshot().day_pnl == -200  # only the move since the reset
+    await broker.place_order(OrderRequest("NQ", Side.SELL, 2))
+    snap = broker.account_snapshot()
+    assert snap.realized_pnl_today == -200 and snap.day_pnl == -200
+    assert snap.balance == 50_000 - 600  # the balance carries the whole loss
+
+
 async def test_micro_shares_price_with_mini(broker):
     await broker.place_order(OrderRequest("MNQ", Side.SELL, 10))
     broker.market.set_price("NQ", 24990)

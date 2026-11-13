@@ -38,9 +38,11 @@ memory, which is why the server must run with a single worker.
 | `engine/follower_worker.py` | Everything for one follower: copying, SL/TP sync, reconciliation, flatten |
 | `engine/copy_engine.py` | Leader subscription, dedup, fan-out, pause/resume/kill switch |
 | `engine/events.py` | Records emitted by the engine and the `EngineSink` protocol |
-| `engine/risk.py` | `RiskGuard` hook (`AllowAll` until M4) |
+| `engine/risk.py` | `RiskGuard` protocol, `AllowAll`, `RiskManager` (rules, lock state, risk events) |
+| `core/trading_day.py` | CME trading day (17:00 Chicago roll), trading-hours window in New York time |
 | `services/runtime.py` | Builds/rebuilds the engine from the DB, controls, dashboard snapshot, WS broadcast loop |
 | `services/sinks.py` | `DbSink` (batched writer) and `HubSink` (WebSocket) |
+| `services/risk_store.py` | `DbRiskStore`: persists the daily-loss lock (`risk_state` table) |
 | `api/*` | Auth, status/controls, accounts + copy settings + risk rules, logs + CSV, simulator, WebSocket |
 | `db/*` | Models, seed data, small repository helpers |
 | `cli.py`, `__main__.py` | `python -m app.cli init|hash-password|gen-key`, `python -m app` |
@@ -136,6 +138,23 @@ Each of these exists because its absence caused a real bug. Each has a test in
     seen on two consecutive checks** (`verify_positions`), so an in-flight fill
     does not cause a false correction.
 11. **The sink can never break trading.** Sink errors are caught and logged.
+12. **A risk-locked follower does not copy at all** (`_copying_allowed`), and
+    the lock is set *before* the flatten is sent, so nothing can slip in
+    between.
+13. **Orders that only reduce exposure always pass the risk guard**
+    (`sizing.reduces_exposure`; a reversal through zero does not count as a
+    reduction).
+14. **The risk cap is part of the target, not a block.** `FollowerConfig.
+    position_cap` is the tighter of max contracts and the risk cap, so a capped
+    follower is in sync at the cap. Position + pending + resting same-side
+    entries never exceed the cap: new mirrored entries are sized to the
+    remaining room (`_entry_room`) and a market order first cancels resting
+    entries if it needs their room (`_make_room`).
+15. **Outside trading hours a follower is reduce-only and sticky.** Its target
+    is clamped with `reduce_only_target`, entries are skipped, exits pass. When
+    the window opens, reduce-only is only released once the leader is flat or
+    the follower is already in line (`_update_restrictions`), so it never joins
+    mid-trade.
 
 ### Reconciliation tick (default every 3 s)
 
@@ -143,6 +162,31 @@ For each follower: fetch a broker snapshot, merge it, cancel lagging linked
 orders and stale market remainders, then for every managed symbol call
 `reconciler.decide(target, actual, pending, mode, attempts)`. Result is one of
 `NONE`, `WAIT`, `CORRECT` (send market order) or `ALERT`. Then `_sync_exits`.
+
+### Risk rules (`engine/risk.py`)
+
+`RiskManager` is owned by the runtime, survives engine rebuilds and is attached
+to each new engine. It implements `RiskGuard` (`check_order`, `is_locked`,
+`outside_hours`, `note`) and runs its own loop: woken on every simulated price
+change and at least once per second.
+
+| Rule | Mechanism |
+|---|---|
+| Daily loss limit | `evaluate()` compares `baseline - day_pnl` with the limit. On breach: lock (persisted via `RiskStore`), risk event + error log, then `engine.flatten_follower()`. |
+| Manual re-enable | `unlock()`: clears the lock and sets `baseline` to the current day P&L, so the follower gets a fresh allowance. The worker gets a `JoinAction` (waits for leader flat if needed). |
+| New trading day | `trading_day(now)` changed: locks and baselines cleared, counters reset, `on_new_day` callback (runtime resets simulated day P&L), released workers rejoin. `start_new_day()` does the same on demand for the simulator. |
+| Max position | In the target via `FollowerConfig.risk_max_position`; guard blocks any single non-reducing order that would exceed it. |
+| Trading hours | `outside_hours()` from `within_trading_hours` (New York time, weekdays, windows across midnight supported). The worker turns it into reduce-only mode. |
+
+Day P&L comes from a provider function (`Runtime._day_pnl`): the simulated
+account's snapshot, or the polled `get_account()` cache for other adapters.
+`RiskManager.note()` writes one risk event per follower/rule/trading day and
+counts later hits in memory. The clock is injectable (`now_fn`), which is how
+the tests move through trading hours and the 17:00 roll.
+
+In the simulator, `reset_day()` restarts the day P&L and carries open positions
+at the current price (`_PositionState.day_price`), like a daily settlement; the
+entry price and the balance are unchanged.
 
 ### Engine settings (`engine/config.py`)
 
@@ -179,8 +223,11 @@ orders and stale market remainders, then for every managed symbol call
 * `copier_running` is stored in `app_settings`; pause and kill switch survive
   a restart.
 * Tables: `accounts`, `copy_settings`, `contract_mappings`, `risk_rules`,
-  `risk_events`, `leader_events`, `follower_orders`, `system_log`,
-  `app_settings`. Times are UNIX epoch seconds (UTC).
+  `risk_state`, `risk_events`, `leader_events`, `follower_orders`,
+  `system_log`, `app_settings`. Times are UNIX epoch seconds (UTC).
+* Risk rule changes are applied live (`Runtime.apply_follower_settings`):
+  the rules go to the `RiskManager`, the cap goes into the follower's config,
+  and a reconciliation tick is queued.
 * Tables are created with `create_all` on startup. There are no migrations yet;
   a schema change needs either a migration tool or deleting the dev database.
 
@@ -193,10 +240,14 @@ orders and stale market remainders, then for every managed symbol call
 | Copier | `POST /api/copier/pause`, `/resume`, `/kill`, `/reconcile` |
 | Accounts | `GET/POST /api/accounts`, `GET/PUT/DELETE /api/accounts/{id}`, `POST .../test-connection`, `.../flatten`, `.../retry-sync`, `GET .../orders` |
 | Copy settings | `GET/PUT /api/accounts/{id}/copy-settings` |
-| Risk | `GET/PUT /api/accounts/{id}/risk-rules`, `GET /api/risk/events` |
+| Risk | `GET/PUT /api/accounts/{id}/risk-rules`, `POST /api/accounts/{id}/risk/unlock`, `GET /api/risk/events` (`?day=today`) |
 | Logs | `GET /api/trades`, `GET /api/trades/export.csv`, `GET /api/logs` |
-| Simulator | `GET /api/sim/state`, `POST /api/sim/order`, `/close`, `/price`, `/walk`, `/orders/{id}/modify`, `/orders/{id}/cancel`, `/accounts/{id}/failures` |
-| Live | WebSocket `/ws`: `snapshot`, `leader_event`, `follower_order`, `log` |
+| Simulator | `GET /api/sim/state`, `POST /api/sim/order`, `/close`, `/price`, `/walk`, `/new-day`, `/orders/{id}/modify`, `/orders/{id}/cancel`, `/accounts/{id}/failures` |
+| Live | WebSocket `/ws`: `snapshot`, `leader_event`, `follower_order`, `log`, `risk_event` |
+
+The snapshot (`GET /api/status` and the `snapshot` WebSocket message) carries
+`trading_day`, `next_reset` and, per follower, `risk` (locked, loss used, limit,
+cap, trading hours, counts) and `copy.reduce_only` / `copy.risk_locked`.
 
 Security details: sessions are server-side (the cookie only holds a session id
 and is `HttpOnly`, `SameSite=Strict`); five failed logins lock the client for
@@ -212,6 +263,7 @@ and is `HttpOnly`, `SameSite=Strict`); five failed logins lock the client for
 | `src/lib/live.tsx` | WebSocket with reconnect; `useLive()` (snapshot, alerts, latencies), `useLiveEvents()` |
 | `src/lib/types.ts` | Types matching the API payloads |
 | `src/components/ui.tsx` | Button, Card, Badge, Input, Select, Toggle, Field, Modal, Table, toasts |
+| `src/components/RiskControls.tsx` | Loss meter and the re-enable button with its confirmation |
 | `src/pages/*` | Dashboard, Accounts, CopySettings, Risk, TradeLog, SystemLog, Simulator, Login |
 
 FastAPI serves `frontend/dist` and falls back to `index.html` for browser
@@ -220,12 +272,14 @@ routes; unknown `/api/*` paths stay 404.
 ## Tests
 
 * `tests/unit`: sizing and rounding, reconciliation decision, state books,
-  simulated broker, Tradovate stub.
+  simulated broker, Tradovate stub, trading day and trading hours, risk guard.
 * `tests/integration`: engine scenarios with the simulated broker (entry/exit,
   scale in/out, SL/TP modify, partial fills, rejection, disconnects, duplicate
-  events, leader closes while follower pending, pause/kill/flatten).
+  events, leader closes while follower pending, pause/kill/flatten, daily loss
+  breach / re-enable / new day, max position, trading hours).
 * `tests/api`: login and security, account CRUD, trade flow through the API,
-  CSV, WebSocket, SPA serving.
+  CSV, WebSocket, SPA serving, risk rules live (breach, unlock, restart, new
+  day).
 
 Integration tests use `rig.settle()` (waits until every queue is empty) instead
 of sleeping, so they are deterministic.

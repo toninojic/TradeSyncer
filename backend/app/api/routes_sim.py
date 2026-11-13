@@ -80,6 +80,14 @@ async def set_walk(body: SimWalkIn, runtime: Runtime = Depends(get_runtime)) -> 
     return {"random_walk": runtime.market.walk_running}
 
 
+@router.post("/new-day")
+async def new_trading_day(runtime: Runtime = Depends(get_runtime)) -> dict:
+    """Do now what normally happens at 17:00 Chicago time: reset the day P&L of
+    the simulated accounts and re-enable followers locked by the daily loss limit."""
+    await runtime.new_trading_day()
+    return {"ok": True, **runtime.risk.info()}
+
+
 @router.post("/order")
 async def place_leader_order(body: SimOrderIn, runtime: Runtime = Depends(get_runtime)) -> dict:
     leader = _leader(runtime)

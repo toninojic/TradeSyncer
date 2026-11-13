@@ -40,12 +40,22 @@ class FollowerConfig:
     copy_sl_tp: bool = True
     mismatch_mode: MismatchMode = MismatchMode.AUTO_CORRECT
     copy_enabled: bool = True
+    # Hard cap from the follower's risk rules (max position per symbol).
+    risk_max_position: int | None = None
+
+    @property
+    def position_cap(self) -> int | None:
+        """The tighter of the sizing cap (max contracts) and the risk cap."""
+        caps = [c for c in (self.max_contracts, self.risk_max_position) if c is not None]
+        return min(caps) if caps else None
 
     def validate(self) -> None:
         if self.multiplier <= 0:
             raise ValueError("Multiplier must be positive")
         if self.max_contracts is not None and self.max_contracts < 0:
             raise ValueError("max_contracts cannot be negative")
+        if self.risk_max_position is not None and self.risk_max_position < 0:
+            raise ValueError("risk_max_position cannot be negative")
         seen: set[str] = set()
         for mapping in self.mappings:
             mapping.validate()

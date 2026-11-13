@@ -282,7 +282,17 @@ async def put_risk_rules(account_id: int, body: RiskRulesIn, db: AsyncSession = 
     await db.commit()
     await runtime.log(LogLevel.INFO, LogCategory.RISK, "Risk rules updated", account.engine_id,
                       data=body.model_dump())
+    await runtime.apply_follower_settings(account.id)
     return _risk_out(account)
+
+
+@router.post("/{account_id}/risk/unlock")
+async def unlock_risk(account_id: int, runtime: Runtime = Depends(get_runtime)) -> dict:
+    """Re-enable copying after a daily-loss lock. The follower gets a fresh
+    allowance of the same size, measured from its current day P&L."""
+    if not await runtime.unlock_risk(account_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This account is not locked by a risk rule")
+    return {"ok": True}
 
 
 @router.get("/{account_id}/risk-events")

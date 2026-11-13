@@ -1,10 +1,11 @@
 import { OctagonX, Pause, Play, RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { LossMeter, ReEnableButton } from "@/components/RiskControls";
 import { ConnectionBadge, CopierBadge, LevelBadge, SyncBadge } from "@/components/status";
 import { Badge, Button, Card, ConfirmDialog, Empty, PageHeader, Table, Td, Th, useToast } from "@/components/ui";
 import { api } from "@/lib/api";
-import { UNDERLYING_LABEL, money, ms, pnlClass, price, signedQty, time } from "@/lib/format";
+import { UNDERLYING_LABEL, money, ms, pnlClass, price, shortDateTime, signedQty, time } from "@/lib/format";
 import { useLive } from "@/lib/live";
 import type { AccountStatus } from "@/lib/types";
 
@@ -91,6 +92,10 @@ export function DashboardPage() {
             <OctagonX size={26} /> KILL SWITCH
           </button>
           <p className="mt-2 text-xs text-slate-500">Flattens every follower and stops copying. The leader is not touched.</p>
+          <p className="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-400">
+            Trading day <span className="num text-slate-200">{snapshot.trading_day}</span> · daily P&L and loss limits reset{" "}
+            <span className="text-slate-200">{shortDateTime(snapshot.next_reset)}</span>
+          </p>
         </Card>
 
         {/* ------------------------------------------------ leader */}
@@ -147,7 +152,7 @@ export function DashboardPage() {
                 <Th>Connection</Th>
                 <Th>Sync</Th>
                 <Th>Position / target</Th>
-                <Th className="text-right">Today's P&L</Th>
+                <Th className="text-right">Today's P&L · loss limit</Th>
                 <Th className="text-right">Latency (last / avg)</Th>
                 <Th className="text-right">Orders</Th>
                 <Th />
@@ -165,17 +170,32 @@ export function DashboardPage() {
                   <Td>
                     <ConnectionBadge connection={f.connection} />
                   </Td>
-                  <Td>{f.enabled ? <SyncBadge status={f.copy?.sync_status} /> : <Badge>Disabled</Badge>}</Td>
+                  <Td>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {f.enabled ? <SyncBadge status={f.copy?.sync_status} /> : <Badge>Disabled</Badge>}
+                      {f.copy?.reduce_only && !f.risk?.locked && (
+                        <span title="Outside the allowed trading hours: exits are copied, new entries are not">
+                          <Badge tone="amber">Exits only</Badge>
+                        </span>
+                      )}
+                    </div>
+                  </Td>
                   <Td>
                     <PositionVsTarget account={f} />
                   </Td>
-                  <Td className={`num text-right font-medium ${pnlClass(f.day_pnl)}`}>{money(f.day_pnl, { sign: true })}</Td>
+                  <Td className="text-right">
+                    <div className={`num font-medium ${pnlClass(f.day_pnl)}`}>{money(f.day_pnl, { sign: true })}</div>
+                    <div className="mt-1 flex justify-end">
+                      <LossMeter risk={f.risk} compact />
+                    </div>
+                  </Td>
                   <Td className="num text-right text-slate-300">
                     {ms(f.copy?.last_latency_ms)} / {ms(f.copy?.avg_latency_ms)}
                   </Td>
                   <Td className="num text-right">{f.working_orders}</Td>
                   <Td className="text-right">
                     <div className="flex justify-end gap-1.5">
+                      {f.risk?.locked && <ReEnableButton account={f} />}
                       {f.copy && (f.copy.sync_status === "out_of_sync" || f.copy.correction_attempts > 0) && (
                         <Button
                           size="sm"

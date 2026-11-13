@@ -79,6 +79,15 @@
 | Latency | Time from receiving the leader's fill to the follower's order ack |
 | Flatten | Cancel all working orders and close all positions on an account |
 | Kill switch | Flatten every follower and stop copying; the leader is untouched |
+| Daily loss limit | Max loss (realized + unrealized) per trading day; reaching it flattens and locks the follower |
+| Risk lock / "Loss limit hit" | Follower is not copying because of the daily loss limit, until the next trading day or a manual re-enable |
+| Loss used | How much of the daily allowance is consumed; measured from the baseline |
+| Baseline | Day P&L at the last manual re-enable; the loss is measured from there |
+| Max position | Hard cap on the follower's contracts per symbol (risk rule) |
+| Room | Contracts that can still be added under the cap, counting resting entry orders |
+| Trading hours | Window in New York time in which new entries are copied |
+| Reduce-only / "Exits only" | Outside trading hours: the follower may only shrink its position |
+| Day roll / reset | 17:00 Chicago: daily P&L, loss limits and locks start over |
 | Event | Broker message (placed, modified, cancelled, filled ...) with a unique id |
 | Dedup | Ignoring an event whose id was already processed |
 | Backoff | Growing pauses between reconnect attempts (0.5 s, 1 s, 2 s ... max 30 s) |

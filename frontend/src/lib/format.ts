@@ -45,6 +45,24 @@ export function smartTime(ts: number | null | undefined): string {
   return d.toDateString() === today.toDateString() ? time(ts, true) : dateTime(ts);
 }
 
+/** Local date and time without seconds, e.g. "Fri 14 Nov, 00:00". */
+export function shortDateTime(ts: number | null | undefined): string {
+  if (!ts) return "–";
+  return new Date(ts * 1000).toLocaleString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export const RULE_LABEL: Record<string, string> = {
+  daily_loss_limit: "Daily loss limit",
+  max_position: "Max position",
+  trading_hours: "Trading hours",
+};
+
 export function ms(value: number | null | undefined): string {
   if (value === null || value === undefined) return "–";
   return value < 10 ? `${value.toFixed(2)} ms` : `${Math.round(value)} ms`;

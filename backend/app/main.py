@@ -72,7 +72,7 @@ def create_app(
             await runtime.stop()
             await db_engine.dispose()
 
-    app = FastAPI(title="TradeCopier", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="TradeCopier", version="0.4.0", lifespan=lifespan)
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.session_secret,

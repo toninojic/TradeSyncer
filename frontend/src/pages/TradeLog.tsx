@@ -48,6 +48,7 @@ export function TradeLogPage() {
   const trades = useQuery({
     queryKey: ["trades", params, limit],
     queryFn: () => api.get<{ items: TradeItem[]; has_more: boolean }>(`/api/trades${queryString({ ...params, limit })}`),
+    staleTime: 0, // always reload when the page opens
   });
   useLiveEvents(["leader_event", "follower_order"], () => live && void trades.refetch(), 400);
 

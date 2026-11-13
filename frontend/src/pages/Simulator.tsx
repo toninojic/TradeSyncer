@@ -2,9 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { Minus, Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ConnectionBadge, RoleBadge } from "@/components/status";
-import { Badge, Button, Card, Empty, Field, Input, PageHeader, Select, Table, Td, Th, Toggle, useToast } from "@/components/ui";
+import { Badge, Button, Card, ConfirmDialog, Empty, Field, Input, PageHeader, Select, Table, Td, Th, Toggle, useToast } from "@/components/ui";
 import { api } from "@/lib/api";
-import { UNDERLYING_LABEL, price, signedQty, SYMBOLS } from "@/lib/format";
+import { UNDERLYING_LABEL, price, shortDateTime, signedQty, SYMBOLS } from "@/lib/format";
 import { useLive } from "@/lib/live";
 import type { BrokerOrder, FailureState, SimState } from "@/lib/types";
 
@@ -32,7 +32,51 @@ export function SimulatorPage() {
         <PositionsCard />
       </div>
       <FailureCard state={sim.data} />
+      <TradingDayCard tradingDay={snapshot.trading_day} nextReset={snapshot.next_reset} />
     </div>
+  );
+}
+
+// ------------------------------------------------------------------ trading day
+
+function TradingDayCard({ tradingDay, nextReset }: { tradingDay: string; nextReset: number }) {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function start() {
+    setBusy(true);
+    try {
+      await api.post("/api/sim/new-day");
+      toast("success", "New trading day started");
+    } catch (err) {
+      toast("error", (err as Error).message);
+    } finally {
+      setBusy(false);
+      setOpen(false);
+    }
+  }
+
+  return (
+    <Card
+      title="Trading day"
+      description="The trading day rolls by itself at 17:00 Chicago time. Use the button to test what happens then without waiting."
+      actions={<Button onClick={() => setOpen(true)}>Start new trading day now</Button>}
+    >
+      <p className="text-sm text-slate-300">
+        Current trading day <span className="num font-medium text-white">{tradingDay}</span>. Next automatic reset:{" "}
+        <span className="font-medium text-white">{shortDateTime(nextReset)}</span> (your time).
+      </p>
+      <ConfirmDialog
+        open={open}
+        title="Start a new trading day now?"
+        confirmLabel="Start new day"
+        loading={busy}
+        onClose={() => setOpen(false)}
+        onConfirm={() => void start()}
+        message="Today's P&L of every simulated account restarts at zero (balances keep their profit or loss), risk counters are cleared, and followers locked by the daily loss limit copy again. Open positions stay open; their day P&L is counted from the current price."
+      />
+    </Card>
   );
 }
 

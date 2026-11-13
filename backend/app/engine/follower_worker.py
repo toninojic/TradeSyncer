@@ -18,6 +18,16 @@ How a follower is kept in line with the leader
   their leader counterpart already did.
 * The reconciliation tick compares target and actual using a fresh broker
   snapshot and either auto-corrects or alerts.
+
+Risk rules (see :mod:`app.engine.risk`)
+---------------------------------------
+* A follower locked by the daily loss limit does not copy at all.
+* The max-position cap is part of the target, and resting entries plus the
+  position never add up to more than the cap ("room").
+* Outside the allowed trading hours the follower is *reduce-only*: its target
+  is clamped so it can only shrink its position. When the window opens while
+  the leader is in a trade, the follower stays reduce-only until the leader is
+  flat (no joining mid-trade).
 """
 
 from __future__ import annotations
@@ -56,7 +66,7 @@ from app.engine.events import (
     StatusChanged,
 )
 from app.engine.reconciler import ReconcileAction, SyncStatus, decide
-from app.engine.sizing import follower_targets, order_delta
+from app.engine.sizing import follower_targets, order_delta, reduce_only_target, reduces_exposure
 from app.engine.state import PositionBook
 
 if TYPE_CHECKING:
@@ -149,6 +159,7 @@ class FollowerWorker:
         self.latencies: deque[float] = deque(maxlen=engine.settings.latency_samples)
         self.halted = False
         self.flatten_pending = False  # a flatten failed (e.g. offline); retried on reconnect
+        self.reduce_only = False  # outside trading hours: exits only (see _update_restrictions)
         self.initialized = False
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self._busy = False
@@ -285,7 +296,8 @@ class FollowerWorker:
             or (event.type is BrokerEventType.ORDER_PLACED and event.order.type is not OrderType.MARKET)
         )
         if (relevant and self.initialized and self.engine.running and not self.halted
-                and self.cfg.copy_enabled and not self.adapter.is_connected):
+                and self.cfg.copy_enabled and not self.adapter.is_connected
+                and not self.engine.risk.is_locked(self.id)):
             # Leave a trace in the trade log; reconciliation catches up after reconnect.
             symbol = self.cfg.mapping_for(event.order.symbol).follower_symbol
             await self._emit(FollowerOrderRecord(
@@ -309,6 +321,7 @@ class FollowerWorker:
                 )
                 await self._emit(StatusChanged(self.id, "joined"))
             return
+        await self._update_restrictions()
         if event.type is BrokerEventType.ORDER_PLACED:
             await self._on_leader_order_placed(action)
         elif event.type is BrokerEventType.ORDER_MODIFIED:
@@ -325,7 +338,28 @@ class FollowerWorker:
             and not self.halted
             and self.cfg.copy_enabled
             and self.adapter.is_connected
+            and not self.engine.risk.is_locked(self.id)
         )
+
+    async def _update_restrictions(self) -> None:
+        """Enter reduce-only mode outside the trading hours; leave it when the
+        window is open again and the follower would not be joining mid-trade."""
+        if self.engine.risk.outside_hours(self.id):
+            if not self.reduce_only:
+                self.reduce_only = True
+                await self._log(LogLevel.INFO, LogCategory.RISK,
+                                "Outside allowed trading hours: exits only, no new entries")
+                await self._emit(StatusChanged(self.id, "reduce_only"))
+            return
+        if not self.reduce_only:
+            return
+        raw = follower_targets(self.engine.leader.positions, self.cfg)
+        in_line = all(self.book.position(symbol) == target for symbol, target in raw.items())
+        if self.engine.leader.is_flat() or in_line:
+            self.reduce_only = False
+            await self._log(LogLevel.INFO, LogCategory.RISK,
+                            "Trading hours are open: copying entries again")
+            await self._emit(StatusChanged(self.id, "reduce_only_off"))
 
     def _leader_order(self, order: Order) -> Order:
         return self.engine.leader.orders.get(order.id, order)
@@ -362,10 +396,28 @@ class FollowerWorker:
         )
         if delta == 0:
             link.status = "skipped"
-            await self._record_skip_raw(leader_event_id, lo.id, symbol, "Size rounds to 0 contracts")
+            await self._record_skip_raw(leader_event_id, lo.id, symbol, self._zero_size_reason(lo.symbol))
             return
+        if self.reduce_only:
+            link.status = "skipped"
+            reason = "Outside allowed trading hours: entry order not copied"
+            self.engine.risk.note(self.id, "trading_hours", reason)
+            await self._record_skip_raw(leader_event_id, lo.id, symbol, reason)
+            return
+        side = Side.from_sign(delta)
+        qty = abs(delta)
+        room = self._entry_room(symbol, side)
+        if room is not None and qty > room:
+            reason = (f"Max position {self.cfg.risk_max_position}: entry order "
+                      f"{'not copied' if room == 0 else f'reduced from {qty} to {room}'}")
+            self.engine.risk.note(self.id, "max_position", f"{symbol}: {reason}")
+            if room == 0:
+                link.status = "skipped"
+                await self._record_skip_raw(leader_event_id, lo.id, symbol, reason)
+                return
+            qty = room
         request = OrderRequest(
-            symbol=symbol, side=Side.from_sign(delta), qty=abs(delta), type=lo.type,
+            symbol=symbol, side=side, qty=qty, type=lo.type,
             limit_price=lo.limit_price, stop_price=lo.stop_price,
             client_order_id=f"{leader_event_id}:{self.id}:{link.placements}",
         )
@@ -410,7 +462,19 @@ class FollowerWorker:
                                leader_event_id=event.event_id, leader_order_id=lo.id)
             return
         changes: dict[str, Any] = {}
-        new_qty = fo.filled_qty + abs(delta)
+        wanted = abs(delta)
+        room = self._entry_room(symbol, fo.side, exclude_order_id=fo.id)
+        if room is not None and wanted > room:
+            self.engine.risk.note(
+                self.id, "max_position",
+                f"{symbol}: Max position {self.cfg.risk_max_position}: entry order limited to {room}",
+            )
+            wanted = room
+        if wanted == 0:
+            await self._cancel(fo, f"Max position {self.cfg.risk_max_position} reached",
+                               leader_event_id=event.event_id, leader_order_id=lo.id)
+            return
+        new_qty = fo.filled_qty + wanted
         if new_qty != fo.qty:
             changes["qty"] = new_qty
         if lo.type is OrderType.LIMIT and lo.limit_price != fo.limit_price:
@@ -473,6 +537,8 @@ class FollowerWorker:
                 before = dict(after)
                 before[fill.symbol] = before.get(fill.symbol, 0) - fill.side.sign * fill.qty
                 symbol, delta = order_delta(before, self.cfg, fill.symbol, fill.side.sign * fill.qty)
+                if self.reduce_only:
+                    delta = self._reduce_only_delta(symbol, delta)
                 if delta:
                     await self._send(
                         OrderRequest(symbol, Side.from_sign(delta), abs(delta),
@@ -484,7 +550,8 @@ class FollowerWorker:
         if sent == 0 and not covered:
             symbol = self.cfg.mapping_for(lo.symbol).follower_symbol
             await self._record_skip_raw(event.event_id, lo.id, symbol,
-                                        "Follower already at target (size rounds to 0)")
+                                        self._zero_size_reason(lo.symbol))
+        self._note_cap(lo.symbol)
         await self._sync_exits(event.event_id, action.received_mono)
 
     # ================================================================== follower events
@@ -510,7 +577,84 @@ class FollowerWorker:
     # ================================================================== core: targets & pending
 
     def targets(self) -> dict[str, int]:
-        return follower_targets(self.engine.leader.positions, self.cfg)
+        targets = follower_targets(self.engine.leader.positions, self.cfg)
+        if self.reduce_only:
+            for symbol, target in targets.items():
+                targets[symbol] = reduce_only_target(target, self.book.position(symbol))
+        return targets
+
+    # ------------------------------------------------------------------ risk helpers
+
+    def _zero_size_reason(self, leader_symbol: str) -> str:
+        """Why nothing was sent for a leader event (shown in the trade log)."""
+        symbol = self.cfg.mapping_for(leader_symbol).follower_symbol
+        raw = follower_targets(self.engine.leader.positions, self.cfg).get(symbol, 0)
+        if self.reduce_only and raw != self.targets().get(symbol, 0):
+            reason = "Outside allowed trading hours: entry not copied (exits only)"
+            self.engine.risk.note(self.id, "trading_hours", reason)
+            return reason
+        if self._risk_cap_binding(symbol):
+            return f"Max position {self.cfg.risk_max_position} reached"
+        return "Follower already at target (size rounds to 0)"
+
+    def _risk_cap_binding(self, symbol: str) -> bool:
+        cap = self.cfg.risk_max_position
+        if cap is None or (self.cfg.max_contracts is not None and self.cfg.max_contracts <= cap):
+            return False
+        wanted = follower_targets(self.engine.leader.positions, self.cfg, capped=False).get(symbol, 0)
+        return abs(wanted) > cap
+
+    def _note_cap(self, leader_symbol: str) -> None:
+        symbol = self.cfg.mapping_for(leader_symbol).follower_symbol
+        if self._risk_cap_binding(symbol):
+            wanted = follower_targets(self.engine.leader.positions, self.cfg, capped=False)[symbol]
+            self.engine.risk.note(
+                self.id, "max_position",
+                f"{symbol}: position capped at {self.cfg.risk_max_position} "
+                f"(leader size would give {abs(wanted)})",
+            )
+
+    def _reduce_only_delta(self, symbol: str, delta: int) -> int:
+        """Limit a signed order quantity so it can only shrink the position."""
+        position = self.book.position(symbol) + self._pending(symbol)
+        if delta == 0 or position == 0 or (position > 0) == (delta > 0):
+            return 0
+        return -position if abs(delta) > abs(position) else delta
+
+    def _resting_entries(self, symbol: str, side: Side) -> list[Order]:
+        """Working mirrored entry orders on one side (they add exposure when they fill)."""
+        result = []
+        for order in self.book.active_orders():
+            link = self.links_by_follower_order.get(order.id)
+            if (order.symbol == symbol and order.side is side and order.type is not OrderType.MARKET
+                    and link is not None and link.kind == "entry"):
+                result.append(order)
+        return result
+
+    def _entry_room(self, symbol: str, side: Side, exclude_order_id: str | None = None) -> int | None:
+        """Contracts that can still be added on `side` without the position plus
+        all resting entries exceeding the risk cap. None = no cap."""
+        cap = self.cfg.risk_max_position
+        if cap is None:
+            return None
+        exposure = side.sign * (self.book.position(symbol) + self._pending(symbol))
+        resting = sum(o.remaining for o in self._resting_entries(symbol, side)
+                      if o.id != exclude_order_id)
+        return max(0, cap - exposure - resting)
+
+    async def _make_room(self, request: OrderRequest) -> None:
+        """A market order needs room under the cap: cancel resting entries on the
+        same side (newest first) until it fits."""
+        room = self._entry_room(request.symbol, request.side)
+        if room is None or request.qty <= room:
+            return
+        for order in sorted(self._resting_entries(request.symbol, request.side),
+                            key=lambda o: o.created_at, reverse=True):
+            await self._cancel(order, f"Max position {self.cfg.risk_max_position}: "
+                                      "making room for a market order")
+            room = self._entry_room(request.symbol, request.side)
+            if room is None or request.qty <= room:
+                return
 
     def _pending(self, symbol: str) -> int:
         total = 0
@@ -714,6 +858,9 @@ class FollowerWorker:
         if not self.cfg.copy_enabled:
             await self._set_status(SyncStatus.DISABLED)
             return
+        if self.engine.risk.is_locked(self.id):
+            await self._set_status(SyncStatus.RISK_LOCKED)
+            return
         if not self.engine.running or self.halted:
             await self._set_status(SyncStatus.PAUSED)
             return
@@ -726,6 +873,7 @@ class FollowerWorker:
                 await self._set_status(SyncStatus.WAITING)
                 return
 
+        await self._update_restrictions()
         await self._cancel_lagging(exclude=None, expired_only=True)
         await self._cancel_stale_market_orders()
 
@@ -893,7 +1041,9 @@ class FollowerWorker:
             self.supervisor.ensure_connected()
             return await self._fail(record, RecordStatus.FAILED, "Follower not connected")
         current = self.book.position(request.symbol) + self._pending(request.symbol)
-        reduces = abs(current + request.side.sign * request.qty) < abs(current)
+        reduces = reduces_exposure(current, request.side.sign * request.qty)
+        if request.type is OrderType.MARKET and not reduces:
+            await self._make_room(request)
         reason = self.engine.risk.check_order(self.id, request, current, reduces)
         if reason:
             await self._log(LogLevel.WARNING, LogCategory.RISK, f"Order blocked: {reason}")
@@ -1066,6 +1216,8 @@ class FollowerWorker:
             "mismatch_mode": str(self.cfg.mismatch_mode),
             "correction_attempts": self.correction_attempts,
             "halted": self.halted,
+            "risk_locked": self.engine.risk.is_locked(self.id),
+            "reduce_only": self.reduce_only,
             "last_latency_ms": latencies[-1] if latencies else None,
             "avg_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
             "working_orders": len(self.book.active_orders()),

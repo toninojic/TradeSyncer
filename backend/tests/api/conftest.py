@@ -82,3 +82,28 @@ def wait_trades(client: TestClient, predicate: Callable[[list], bool], timeout: 
             return items
         time.sleep(0.05)
     raise AssertionError(f"trade log condition not met: {items}")
+
+
+def wait_risk_events(client: TestClient, expected: list[tuple[int, str]], timeout: float = 5.0) -> list:
+    """Risk events are written by a background task; wait until they are stored."""
+    deadline = time.time() + timeout
+    events: list = []
+    while time.time() < deadline:
+        events = client.get("/api/risk/events", params={"day": "today"}).json()
+        if [(e["account_id"], e["rule"]) for e in events] == expected:
+            return events
+        time.sleep(0.05)
+    raise AssertionError(f"risk events {events} != {expected}")
+
+
+def wait_json(client: TestClient, path: str, predicate: Callable[[list], bool], timeout: float = 5.0,
+              **params) -> list:
+    """Poll a list endpoint until the predicate holds (rows are written in the background)."""
+    deadline = time.time() + timeout
+    rows: list = []
+    while time.time() < deadline:
+        rows = client.get(path, params=params).json()
+        if predicate(rows):
+            return rows
+        time.sleep(0.05)
+    raise AssertionError(f"{path} {params}: condition not met: {rows}")

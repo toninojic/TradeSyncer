@@ -9,7 +9,8 @@ export type SyncStatus =
   | "waiting_for_leader_flat"
   | "paused"
   | "disabled"
-  | "disconnected";
+  | "disconnected"
+  | "risk_locked";
 
 export interface PositionView {
   symbol: string;
@@ -29,9 +30,25 @@ export interface CopyStatus {
   mismatch_mode: MismatchMode;
   correction_attempts: number;
   halted: boolean;
+  risk_locked: boolean;
+  reduce_only: boolean;
   last_latency_ms: number | null;
   avg_latency_ms: number | null;
   working_orders: number;
+}
+
+export interface RiskStatus {
+  locked: boolean;
+  locked_at: number | null;
+  reason: string | null;
+  daily_loss_limit: number | null;
+  loss_used: number | null;
+  max_position: number | null;
+  trading_hours_enabled: boolean;
+  trading_start: string;
+  trading_end: string;
+  in_trading_hours: boolean;
+  triggered_today: Record<string, number>;
 }
 
 export interface AccountStatus {
@@ -49,6 +66,7 @@ export interface AccountStatus {
   positions: PositionView[];
   working_orders: number;
   copy?: CopyStatus;
+  risk?: RiskStatus;
 }
 
 export interface Snapshot {
@@ -57,6 +75,8 @@ export interface Snapshot {
   prices: Record<string, number>;
   random_walk: boolean;
   server_time: number;
+  trading_day: string;
+  next_reset: number;
 }
 
 export type BrokerType = "sim" | "tradovate";
@@ -221,4 +241,5 @@ export type WsMessage =
   | { type: "leader_event"; data: LeaderEvent }
   | { type: "follower_order"; data: FollowerOrder }
   | { type: "log"; data: LogEntry }
+  | { type: "risk_event"; data: Omit<RiskEvent, "id"> }
   | { type: "pong" };

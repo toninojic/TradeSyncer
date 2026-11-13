@@ -114,6 +114,20 @@ class LogRecord:
 
 
 @dataclass(slots=True)
+class RiskEventRecord:
+    """A risk rule was triggered (shown on the Risk page)."""
+
+    follower_id: str
+    rule: str  # daily_loss_limit | max_position | trading_hours
+    message: str
+    trading_day: str  # YYYY-MM-DD (CME trade date)
+    ts: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class StatusChanged:
     """Something visible on the dashboard changed (positions, sync status, ...)."""
 
@@ -121,7 +135,7 @@ class StatusChanged:
     reason: str = ""
 
 
-EngineRecord = LeaderEventRecord | FollowerOrderRecord | LogRecord | StatusChanged
+EngineRecord = LeaderEventRecord | FollowerOrderRecord | LogRecord | RiskEventRecord | StatusChanged
 
 
 class EngineSink(Protocol):
@@ -135,6 +149,7 @@ class MemorySink:
         self.leader_events: list[LeaderEventRecord] = []
         self.follower_orders: dict[str, FollowerOrderRecord] = {}
         self.logs: list[LogRecord] = []
+        self.risk_events: list[RiskEventRecord] = []
         self.status_changes = 0
 
     async def emit(self, record: EngineRecord) -> None:
@@ -144,6 +159,8 @@ class MemorySink:
             self.follower_orders[record.id] = record
         elif isinstance(record, LogRecord):
             self.logs.append(record)
+        elif isinstance(record, RiskEventRecord):
+            self.risk_events.append(record)
         else:
             self.status_changes += 1
 

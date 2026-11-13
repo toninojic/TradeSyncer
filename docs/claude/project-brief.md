@@ -41,7 +41,7 @@ accounts only: no multi-user support, no billing.
 | Reconciliation | every 3 s compare expected vs actual follower position; per follower either auto-correct or alert only |
 | Failure handling | rejected orders, partial fills, reconnect with backoff, leader closing while a follower order is pending |
 | Latency | measured from receiving the leader fill to the follower order ack |
-| Risk (M4) | per follower: daily loss limit, max position, allowed trading hours |
+| Risk | per follower: daily loss limit (flatten + lock until the next trading day), max position (hard cap), allowed trading hours (exits only outside) |
 | Controls | pause/resume, global kill switch (flatten all followers, stop copying), per-account flatten |
 | Admin panel | Dashboard, Accounts, Copy settings, Risk, Trade log (filters, CSV), System log, Simulator |
 | Seed data | 1 leader + 3 simulated followers: 1x NQ, 0.5x NQ, NQ -> MNQ 10:1 |
@@ -68,5 +68,13 @@ journaling, Pine Script / webhooks.
 * After pause/resume, kill switch or a manual flatten, a follower does **not**
   jump into a trade that is already open; it waits until the leader is flat.
 * The kill switch never touches the leader account.
+* **Max position caps, it does not block.** A follower whose leader exceeds the
+  cap holds exactly the cap and counts as in sync.
+* **Outside trading hours a follower is reduce-only**: exits are copied, entries
+  are not, and it does not join an open trade when the window opens.
+* **Manual re-enable after a daily-loss lock gives a fresh allowance** of the
+  same size, measured from the follower's P&L at that moment.
+* The simulator carries positions across the daily reset at the reset price
+  (like a daily settlement), so yesterday's open loss does not count today.
 * The built admin panel (`frontend/dist`) is committed so the app runs without
   Node.js.

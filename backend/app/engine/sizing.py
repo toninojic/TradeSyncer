@@ -30,8 +30,13 @@ def scaled_qty(leader_abs_qty: int, multiplier: float, ratio: float) -> int:
     return int(value.to_integral_value(rounding=ROUND_FLOOR))
 
 
-def follower_targets(leader_positions: Mapping[str, int], cfg: FollowerConfig) -> dict[str, int]:
-    """Target signed position for every follower symbol this follower manages."""
+def follower_targets(
+    leader_positions: Mapping[str, int], cfg: FollowerConfig, *, capped: bool = True
+) -> dict[str, int]:
+    """Target signed position for every follower symbol this follower manages.
+
+    With ``capped=False`` the max-contracts and risk caps are ignored (used to
+    tell whether a cap is currently limiting the follower)."""
     targets: dict[str, int] = defaultdict(int)
     for symbol in managed_symbols(cfg):
         targets[symbol] = 0
@@ -42,11 +47,27 @@ def follower_targets(leader_positions: Mapping[str, int], cfg: FollowerConfig) -
         targets[mapping.follower_symbol] += _sign(qty) * scaled_qty(
             abs(qty), cfg.multiplier, mapping.ratio
         )
-    if cfg.max_contracts is not None:
-        cap = cfg.max_contracts
+    cap = cfg.position_cap if capped else None
+    if cap is not None:
         for symbol, qty in targets.items():
             targets[symbol] = max(-cap, min(cap, qty))
     return dict(targets)
+
+
+def reduce_only_target(target: int, position: int) -> int:
+    """Clamp a target so the follower can only reduce its current position:
+    never add, never open, never reverse."""
+    if position > 0:
+        return max(0, min(target, position))
+    if position < 0:
+        return min(0, max(target, position))
+    return 0
+
+
+def reduces_exposure(position: int, signed_qty: int) -> bool:
+    """True if trading ``signed_qty`` only shrinks ``position`` (no reversal)."""
+    after = position + signed_qty
+    return position != 0 and position * after >= 0 and abs(after) < abs(position)
 
 
 def managed_symbols(cfg: FollowerConfig) -> set[str]:

@@ -74,6 +74,7 @@ async def make_rig(
     settings: EngineSettings | None = None,
     configs: list[FollowerConfig] | None = None,
     reconcile_loop: bool = False,
+    risk=None,
 ) -> Rig:
     market = SimMarket({"NASDAQ100": NQ_PRICE}, seed=1)
     leader = SimulatedBroker("leader", market)
@@ -85,7 +86,15 @@ async def make_rig(
         stale_market_order_s=0.5,
     )
     configs = configs or follower_configs()
-    engine = CopyEngine(leader, zip(followers, configs), sink=sink, settings=settings)
+    engine = CopyEngine(leader, zip(followers, configs), sink=sink, settings=settings, risk=risk)
+    if risk is not None:
+        brokers = {b.account_id: b for b in followers}
+        risk.sink = sink
+        risk.attach(
+            engine,
+            lambda fid: brokers[fid].account_snapshot().day_pnl,
+            lambda: [b.reset_day() for b in [leader, *followers]],
+        )
     await engine.start(reconcile_loop=reconcile_loop)
     rig = Rig(market, leader, *followers, engine=engine, sink=sink)
     await _wait_connected(rig)

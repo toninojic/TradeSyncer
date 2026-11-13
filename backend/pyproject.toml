@@ -1,6 +1,6 @@
 [project]
 name = "tradecopier"
-version = "0.1.0"
+version = "0.4.0"
 description = "Trade copier MVP: one leader account mirrored to many followers, with a simulated broker."
 requires-python = ">=3.12"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
     "cryptography>=42",
     "argon2-cffi>=23.1",
     "itsdangerous>=2.2",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

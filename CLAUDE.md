@@ -25,7 +25,7 @@ explicitly asks for it.
    the leader does not have (reversed, doubled, orphaned stop). When in doubt,
    prefer doing nothing and alerting over sending an order.
 4. **Tests are part of the change.** Run them before saying something works:
-   `cd backend && pytest -q` (132 tests, about 20 s).
+   `cd backend && pytest -q` (186 tests, about 25 s).
 5. **The built admin panel is committed.** After changing anything in
    `frontend/src`, run `npm run build` in `frontend/` and commit `frontend/dist`
    too, so the owner can run the app without Node.js.
@@ -58,7 +58,7 @@ npm run build                        # writes frontend/dist (commit it)
 | Path | Content |
 |---|---|
 | `backend/app/brokers/` | `BrokerAdapter` interface, `sim/` (market + simulated broker), `tradovate/` (stub) |
-| `backend/app/engine/` | copy engine: sizing, per-follower workers, reconciliation, reconnect, risk hook |
+| `backend/app/engine/` | copy engine: sizing, per-follower workers, reconciliation, reconnect, risk rules |
 | `backend/app/services/` | runtime (engine lifecycle), DB and WebSocket sinks |
 | `backend/app/api/` | REST routes and the `/ws` WebSocket |
 | `backend/app/db/` | SQLAlchemy models, seed data |
