@@ -1,0 +1,32 @@
+services:
+  app:
+    build: .
+    image: tradecopier:latest
+    container_name: tradecopier
+    env_file:
+      - path: .env
+        required: false  # without it the app stops with a clear "run app.cli init" message
+    environment:
+      HOST: 0.0.0.0
+      DATABASE_URL: sqlite+aiosqlite:////app/backend/data/tradecopier.db
+    ports:
+      - "127.0.0.1:8000:8000"  # localhost only
+    volumes:
+      - tradecopier-data:/app/backend/data
+    restart: unless-stopped
+
+  # One-off helper to create the .env file:  docker compose run --rm setup
+  setup:
+    build: .
+    image: tradecopier:latest
+    profiles: ["setup"]
+    user: root
+    working_dir: /app/backend
+    volumes:
+      - ./:/work
+    entrypoint: ["python", "-m", "app.cli", "init", "--env-file", "/work/.env"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  tradecopier-data:

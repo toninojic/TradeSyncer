@@ -1,0 +1,7 @@
+# Keep LF line endings on every OS. Git for Windows would otherwise convert
+# text files to CRLF on checkout, which makes diffs noisy and can break scripts.
+* text=auto eol=lf
+
+*.png  binary
+*.ico  binary
+*.zip  binary
